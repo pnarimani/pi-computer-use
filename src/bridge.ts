@@ -9,6 +9,7 @@ import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from 
 import { canRetryInForeground, outcomeAfterCheck, outcomeAfterObservedValues, prepareAction, type ActionState, type PreparedAction } from "./actions.ts";
 import { cdpClickForContext, cdpDragForContext, cdpEvaluateForContext, cdpKeypressForContext, cdpMouseForContext, cdpNavigateContext, cdpScrollForContext, cdpSnapshotForContext, cdpTabForWindow, cdpTypeFocusedForContext, cdpTypeForContext, disconnectCdp, listCdpPageContexts, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
 import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputerUseConfig } from "./config.ts";
+import { resolveObservationOutputPath, saveObservationImage } from "./observation-image.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
 import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, restoreOutline, searchOutline, searchOutlineRanked, serializeOutline, serializeOutlineNodeShallow, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSearchMatch } from "./outline.ts";
 import { applyOutputEnvelope, boundToolError, clearStoredOutputs, readStoredOutput, UI_TEXT_PAGE_CHARS } from "./output.ts";
@@ -70,6 +71,7 @@ interface ExecutionTrace {
 
 interface ComputerUseDetails {
 	tool: string;
+	outputPath?: string;
 	target: {
 		app: string;
 		bundleId?: string;
@@ -1021,6 +1023,7 @@ async function buildToolResult(
 	_signal?: AbortSignal,
 	imageMode: ImageMode = operationState().currentImageMode ?? "auto",
 	base?: { stateId: string; outline: Outline },
+	outputPath?: string,
 ): Promise<AgentToolResult<ComputerUseDetails>> {
 	const state = operationState();
 	const fallbackReason = imageFallbackReason(tool, result, imageMode);
@@ -1062,6 +1065,7 @@ async function buildToolResult(
 		config: getComputerUseConfig(),
 		helper: runtimeState.helperDiagnostics,
 		imageReason: fallbackReason?.reason,
+		...(outputPath === undefined ? {} : { outputPath }),
 	};
 
 	// Console piggyback: when a CDP connection is active for this browser
@@ -1083,10 +1087,11 @@ async function buildToolResult(
 	const outlineText = useDiff
 		? `\n\nChanges (${transition!.changedNodeCount}, ${base!.stateId} → ${result.capture.stateId}):\n${renderedChanges || "(no element changes)"}\nUse stateId ${result.capture.stateId} for subsequent actions and queries.`
 		: `\n\nOutline (${folded.nodeCount} nodes, stateId ${result.capture.stateId}${transition?.reason ? `, full view: ${transition.reason}` : ""}${folded.truncated ? ", folded output truncated" : ""}):\n${folded.text}`;
-	const fallbackText = fallbackReason ? `\n\n${fallbackReason.message}` : "";
+	const fallbackText = fallbackReason && outputPath === undefined ? `\n\n${fallbackReason.message}` : "";
+	const savedText = outputPath === undefined ? "" : `Saved PNG to ${JSON.stringify(outputPath)}. Image not attached.\n\n`;
 	const deltaText = rootDeltaLines(execution).join("\n");
-	const content: AgentToolResult<ComputerUseDetails>["content"] = [{ type: "text", text: `${summary}${deltaText ? `\n${deltaText}` : ""}${consoleText}${noteText}${outlineText}${fallbackText}` }];
-	if (fallbackReason && result.look.image?.jpegBase64) {
+	const content: AgentToolResult<ComputerUseDetails>["content"] = [{ type: "text", text: `${savedText}${summary}${deltaText ? `\n${deltaText}` : ""}${consoleText}${noteText}${outlineText}${fallbackText}` }];
+	if (outputPath === undefined && fallbackReason && result.look.image?.jpegBase64) {
 		content.push({ type: "image", data: result.look.image.jpegBase64, mimeType: result.look.image.mimeType ?? "image/jpeg" });
 	}
 
@@ -1603,11 +1608,13 @@ function sameRootIdentity(a: CurrentTarget, b: CurrentTarget): boolean {
 }
 
 /** Side effects: captures/updates current target, capture state, look, and parsed outline. */
-async function performObserve(params: ObserveParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | BrowserObservationDetails>> {
+async function performObserve(params: ObserveParams, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<AgentToolResult<ComputerUseDetails | BrowserObservationDetails>> {
+	const outputPath = resolveObservationOutputPath(params, ctx.cwd);
 	const requestedRoot = typeof params.root === "string" ? params.root : undefined;
 	if (requestedRoot && !/^@r\d+$/.test(requestedRoot)) throw new Error("observe_ui.root must be an exact @r ref issued by find_roots.");
 	const browserContextId = requestedRoot ? runtimeState.browserContextByRoot.get(requestedRoot) : undefined;
 	if (isBrowserContextId(browserContextId)) {
+		if (outputPath !== undefined) throw new Error("observe_ui.outputPath is not supported for browser_page roots because they do not provide an image. Use a native desktop browser window instead.");
 		const targetId = browserContextId.slice(BROWSER_CONTEXT_PREFIX.length);
 		const resourceKey = `cdp:${targetId}`;
 		const scheduled = await resourceScheduler.read(resourceKey, async () => await cdpSnapshotForContext(browserContextId));
@@ -1642,7 +1649,8 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 		);
 	}
 	const summary = `Observed ${mode} ${captureResult.target.windowRef ? `${captureResult.target.windowRef} ` : ""}${captureResult.target.appName} — ${captureResult.target.windowTitle}. Returned the latest outline state.`;
-	return await buildToolResult("observe_ui", summary, captureResult, executionTrace("look", "stealth"), signal, imageMode);
+	if (outputPath !== undefined) await saveObservationImage(captureResult.look.image, outputPath, signal);
+	return await buildToolResult("observe_ui", summary, captureResult, executionTrace("look", "stealth"), signal, imageMode, undefined, outputPath);
 }
 
 function currentOutlineOrThrow(stateId?: string): Outline {
@@ -2268,7 +2276,11 @@ async function executeTool<P, T>(ctx: ExtensionContext, params: P, signal: Abort
 	});
 }
 
-function makeToolExecutor<P, D>(tool: string, perform: (params: P, signal?: AbortSignal) => Promise<AgentToolResult<D>>) {
+function makeToolExecutor<P, D>(
+	tool: string,
+	perform: (params: P, signal: AbortSignal | undefined, ctx: ExtensionContext) => Promise<AgentToolResult<D>>,
+	validate?: (params: P, ctx: ExtensionContext) => void,
+) {
 	return async (
 		_toolCallId: string,
 		params: P,
@@ -2277,7 +2289,8 @@ function makeToolExecutor<P, D>(tool: string, perform: (params: P, signal?: Abor
 		ctx: ExtensionContext,
 	): Promise<AgentToolResult<D>> => {
 		try {
-			return applyOutputEnvelope(tool, await executeTool(ctx, params, signal, () => perform(params, signal)));
+			validate?.(params, ctx);
+			return applyOutputEnvelope(tool, await executeTool(ctx, params, signal, () => perform(params, signal, ctx)));
 		} catch (error) {
 			throw boundToolError(tool, error);
 		}
@@ -2287,7 +2300,10 @@ function makeToolExecutor<P, D>(tool: string, perform: (params: P, signal?: Abor
 export const executeFind = makeToolExecutor("find_roots", performListWindows);
 export const executeReadText = makeToolExecutor("read_text", performReadText);
 export const executeWaitFor = makeToolExecutor("wait_for", performWaitFor);
-export const executeObserve = makeToolExecutor("observe_ui", performObserve);
+export const executeObserve = makeToolExecutor("observe_ui", performObserve, (params, ctx) => {
+	// Reject invalid save requests before readiness checks can probe the screen.
+	resolveObservationOutputPath(params, ctx.cwd);
+});
 export const executeSearchUi = makeToolExecutor("search_ui", performSearchUi);
 export const executeExpandUi = makeToolExecutor("expand_ui", performExpandUi);
 export const executeInspectUi = makeToolExecutor("inspect_ui", performInspectUi);

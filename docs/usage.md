@@ -45,6 +45,26 @@ inspect_ui({ stateId, ref: "@e12" })
 
 `semantic` observation is cheapest, `fused` is the default, and `visual` forces visual text evidence. Search requires at least one of `text`, `role`, or `capability`. It ranks exact, prefix, and substring text before conservative fuzzy matches, returns a fixed top set with the total match count, and asks the caller to refine broad queries. Search can escalate OCR once when the original desktop look omitted it; that refresh is checked against the state's resource epoch.
 
+## Save a visual observation
+
+To save the screenshot instead of sending it to the model:
+
+```ts
+observe_ui({
+  root: "@r1",
+  mode: "visual",
+  outputPath: "captures/settings.png",
+})
+```
+
+`outputPath` requires **explicit `mode: "visual"`** and a desktop root. Omit `root` to use normal target selection. Relative paths resolve against the tool context's working directory; absolute paths are also accepted. A leading `@` is stripped using Pi's path convention. Missing parent directories are created and existing destination files are overwritten.
+
+The file is always PNG at the normal visual capture dimensions (currently up to 1600 pixels on the longest edge). JPEG captures are converted without resizing; this does not recover detail already lost to JPEG compression. The exact destination filename is used regardless of extension; prefer `.png`.
+
+The tool still returns its normal outline, refs, and `stateId`, plus a saved-path receipt and `details.outputPath` containing the resolved absolute path. It returns **no image attachment** and does not automatically read the file back. The saved state remains usable for follow-up queries and actions. This setting applies only to this observation; later tools keep their normal image behavior. Saved files survive session cleanup.
+
+Invalid paths, incompatible or omitted modes, missing/corrupt images, conversion failures, and filesystem errors fail the tool call rather than falling back to an image attachment. Managed CDP `browser_page` roots have no screenshot payload and reject `outputPath`; observe a native browser window instead. Omitting `outputPath` preserves all existing behavior.
+
 ## Acting and batching
 
 The public action shape is always transactional:

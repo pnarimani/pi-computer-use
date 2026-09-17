@@ -63,15 +63,17 @@ const findTool = defineTool({
 const observeTool = defineTool({
 	name: "observe_ui",
 	label: "Observe UI",
-	description: "Capture the current/frontmost root or one exact @r root and return a bounded UI outline.",
+	description: "Capture the current/frontmost root or one exact @r root and return a bounded UI outline. In explicit visual mode, outputPath saves a PNG instead of attaching the image.",
 	promptSnippet: "Primary UI observation tool. Follow with search_ui, expand_ui, inspect_ui, or act_ui.",
 	promptGuidelines: [
 		"Use mode=semantic to skip OCR and images, visual to force them, and fused for automatic selection.",
+		"Use observe_ui with mode=visual and outputPath to save a PNG without sending the image to the model; do not automatically read it back.",
 		"Use @e outline refs from observe_ui/search_ui for act_ui; pictureOnly refs are coordinate-only and blocked by UI-tree-only policy.",
 	],
 	parameters: Type.Object({
 		root: Type.Optional(Type.String({ description: "Exact @r ref issued by find_roots" })),
 		mode: Type.Optional(Type.Union([Type.Literal("semantic"), Type.Literal("visual"), Type.Literal("fused")], { description: "Observation mode, default fused" })),
+		outputPath: Type.Optional(Type.String({ minLength: 1, description: "Save a PNG here instead of attaching the image; requires explicit visual mode and a desktop root. Relative to cwd or absolute. Creates parents and overwrites existing files; returns outline/state and saved path." })),
 	}),
 	execute: executeObserve,
 });

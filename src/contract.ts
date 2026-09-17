@@ -34,6 +34,8 @@ export interface EvaluateBrowserParams {
 
 export interface ObserveParams extends ObserveTargetParams {
 	mode?: "semantic" | "visual" | "fused";
+	/** Visual-only PNG destination; relative to ctx.cwd. Overwrites without attaching an image. */
+	outputPath?: string;
 	/** Internal capture override; not part of the model-facing schema. */
 	readText?: "auto" | "always" | "never";
 }
